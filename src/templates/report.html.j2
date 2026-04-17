@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>cgroup v2 report — {{ metadata.target }}</title>
+<style>
+{% include "assets/datatables.min.css" %}
+</style>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 20px; color: #222; }
+header { border-bottom: 2px solid #ddd; padding-bottom: 10px; margin-bottom: 20px; }
+header h1 { margin: 0 0 10px 0; }
+dl.meta { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 14px; }
+dl.meta dt { font-weight: bold; color: #666; }
+dl.meta dd { margin: 0; }
+.cards { display: flex; gap: 12px; margin: 20px 0; flex-wrap: wrap; }
+.card { padding: 14px 20px; border-radius: 8px; background: #f4f4f4; min-width: 100px; text-align: center; }
+.card .num { display: block; font-size: 28px; font-weight: bold; }
+.card .label { display: block; font-size: 12px; text-transform: uppercase; color: #666; }
+.status-not_applicable { color: #666; }
+.compat-summary { border-collapse: collapse; margin: 10px 0; }
+.compat-summary th, .compat-summary td { padding: 6px 12px; border: 1px solid #ddd; text-align: right; }
+.compat-summary th:first-child, .compat-summary td:first-child { text-align: left; }
+.status-compatible { color: #155724; font-weight: bold; }
+.status-incompatible { color: #721c24; font-weight: bold; }
+.status-needs_review { color: #856404; font-weight: bold; }
+td.used-by-cell { cursor: pointer; }
+td.used-by-cell:hover { background: #f0f0f0; }
+.consumers-table { margin: 10px 0; border-collapse: collapse; width: 100%; }
+.consumers-table th, .consumers-table td { border: 1px solid #ddd; padding: 4px 8px; font-size: 13px; }
+.consumers-table th { background: #f8f8f8; }
+section { margin: 30px 0; }
+
+/* --- Summary interactive layout --- */
+.summary-grid { display: grid; grid-template-columns: 1fr auto; gap: 30px; align-items: start; margin-top: 20px; }
+@media (max-width: 900px) { .summary-grid { grid-template-columns: 1fr; } }
+.summary-chart { text-align: center; min-width: 220px; }
+.summary-chart svg { max-width: 240px; height: auto; display: block; margin: 0 auto; }
+.chart-empty { color: #666; font-style: italic; }
+
+/* --- Pie chart slices --- */
+.pie-slice { cursor: pointer; transition: opacity 0.15s; }
+.pie-slice:hover { opacity: 0.85; }
+.pie-slice:focus { outline: 2px solid #333; outline-offset: 2px; }
+
+/* --- Legend --- */
+.chart-legend { list-style: none; padding: 0; margin: 14px 0 0 0; font-size: 13px; text-align: left; }
+.chart-legend li { display: flex; align-items: center; gap: 8px; margin: 4px 0; padding: 2px 6px; border-radius: 3px; cursor: pointer; }
+.chart-legend li:hover { background: #f0f0f0; }
+.chart-legend li:focus { outline: 2px solid #333; }
+.chart-legend .swatch { width: 12px; height: 12px; border-radius: 2px; display: inline-block; flex-shrink: 0; }
+.chart-legend .legend-count { color: #666; margin-left: auto; }
+
+/* --- Interactive cards --- */
+.card { cursor: pointer; user-select: none; transition: box-shadow 0.15s; }
+.card:hover { box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15); }
+.card:focus { outline: 2px solid #333; outline-offset: 2px; }
+.card.empty { cursor: default; opacity: 0.55; }
+.card.empty:hover { box-shadow: none; }
+.card.total-card { background: #ffffff; border: 2px solid #ccc; }
+.card.status-compatible { background: #d4edda; }
+.card.status-incompatible { background: #f8d7da; }
+.card.status-needs_review { background: #fff3cd; }
+.card.status-not_applicable { background: #e2e3e5; }
+
+/* --- Filter banner --- */
+#filter-banner { background: #e7f3ff; border: 1px solid #b3d7ff; padding: 10px 14px; border-radius: 6px; margin: 15px 0 10px 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+#filter-banner .tag { background: #0366d6; color: white; padding: 3px 10px; border-radius: 3px; font-size: 12px; font-family: monospace; }
+#filter-banner .tag .remove { margin-left: 6px; cursor: pointer; opacity: 0.8; }
+#filter-banner .tag .remove:hover { opacity: 1; }
+#filter-banner #clear-filters { margin-left: auto; background: transparent; border: 1px solid #0366d6; color: #0366d6; padding: 4px 12px; border-radius: 3px; cursor: pointer; font-size: 13px; }
+#filter-banner #clear-filters:hover { background: #0366d6; color: white; }
+
+/* --- Compat-summary interactive cells --- */
+.compat-summary td.compat-cell { cursor: pointer; user-select: none; transition: background 0.15s; }
+.compat-summary td.compat-cell:hover { background: #e7f3ff; }
+.compat-summary td.compat-cell:focus { outline: 2px solid #0366d6; outline-offset: -2px; }
+.compat-summary td.compat-cell.empty { cursor: default; color: #bbb; }
+.compat-summary td.compat-cell.empty:hover { background: transparent; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>cgroup v2 compatibility report</h1>
+  <dl class="meta">
+    <dt>Target</dt><dd>{{ metadata.target }}</dd>
+    <dt>Source mode</dt><dd>{{ metadata.source_mode }}</dd>
+    <dt>Generated at</dt><dd>{{ metadata.generated_at }}</dd>
+    <dt>Tool version</dt><dd>{{ metadata.tool_version }}</dd>
+    <dt>CSV file</dt><dd>{{ metadata.csv_filename }}</dd>
+  </dl>
+</header>
+
+<section id="summary">
+  <h2>Summary</h2>
+  <div class="summary-grid">
+    <div class="summary-main">
+      <div class="cards">
+        <div class="card total-card" data-filter-clear="true" tabindex="0" role="button" aria-label="Show all images, clear filters">
+          <span class="num">{{ summary.total_images }}</span>
+          <span class="label">All images</span>
+        </div>
+        {% for status, count in summary.by_overall_status.items() %}
+        <div class="card status-card status-{{ status }}{% if count == 0 %} empty{% endif %}"
+             data-filter-status="{{ status }}"
+             {% if count > 0 %}tabindex="0" role="button"{% endif %}
+             aria-label="Filter to {{ status|replace('_', ' ') }} images">
+          <span class="num">{{ count }}</span>
+          <span class="label">{{ status|replace('_', ' ')|title }}</span>
+        </div>
+        {% endfor %}
+      </div>
+
+      <h3>By runtime</h3>
+      {% macro compat_cell(runtime, state, count) %}
+      {% if count > 0 %}
+      <td class="compat-cell" data-runtime="{{ runtime }}" data-state="{{ state }}"
+          tabindex="0" role="button"
+          aria-label="Filter to {{ runtime }} {{ state|replace('_', ' ') }}, {{ count }} images">{{ count }}</td>
+      {% else %}
+      <td class="compat-cell empty">0</td>
+      {% endif %}
+      {% endmacro %}
+      <table class="compat-summary">
+        <thead><tr><th>Runtime</th><th>Yes</th><th>No</th><th>Unknown / Needs review</th><th>N/A</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Java</td>
+            {{ compat_cell('java', 'yes', summary.by_compatibility.java.yes) }}
+            {{ compat_cell('java', 'no', summary.by_compatibility.java.no) }}
+            {{ compat_cell('java', 'unknown', summary.by_compatibility.java.unknown) }}
+            {{ compat_cell('java', 'na', summary.by_compatibility.java.na) }}
+          </tr>
+          <tr>
+            <td>Node.js</td>
+            {{ compat_cell('node', 'yes', summary.by_compatibility.node.yes) }}
+            {{ compat_cell('node', 'no', summary.by_compatibility.node.no) }}
+            {{ compat_cell('node', 'unknown', summary.by_compatibility.node.unknown) }}
+            {{ compat_cell('node', 'na', summary.by_compatibility.node.na) }}
+          </tr>
+          <tr>
+            <td>.NET</td>
+            {{ compat_cell('dotnet', 'yes', summary.by_compatibility.dotnet.yes) }}
+            {{ compat_cell('dotnet', 'no', summary.by_compatibility.dotnet.no) }}
+            {{ compat_cell('dotnet', 'unknown', summary.by_compatibility.dotnet.unknown) }}
+            {{ compat_cell('dotnet', 'na', summary.by_compatibility.dotnet.na) }}
+          </tr>
+          <tr>
+            <td>Go</td>
+            {{ compat_cell('go', 'yes', summary.by_compatibility.go.yes) }}
+            {{ compat_cell('go', 'no', summary.by_compatibility.go.no) }}
+            {{ compat_cell('go', 'needs_review', summary.by_compatibility.go.needs_review) }}
+            {{ compat_cell('go', 'none', summary.by_compatibility.go.none) }}
+          </tr>
+        </tbody>
+      </table>
+
+      {% if summary.deep_scan.enabled %}
+      <h3>Deep scan</h3>
+      <ul>
+        <li>Matches: {{ summary.deep_scan.matches }}</li>
+        <li>v1-only (likely incompatible): {{ summary.deep_scan.v1_only }}</li>
+        <li>v2-aware (likely safe): {{ summary.deep_scan.v2_aware }}</li>
+        <li>By confidence: high={{ summary.deep_scan.by_confidence.high }}, medium={{ summary.deep_scan.by_confidence.medium }}, low={{ summary.deep_scan.by_confidence.low }}</li>
+      </ul>
+      {% endif %}
+    </div>
+
+    <div class="summary-chart">
+      {% if summary.pie_chart_slices %}
+      <svg viewBox="0 0 200 200" role="img" aria-label="Overall status distribution">
+        {% for slice in summary.pie_chart_slices %}
+        <path d="{{ slice.path }}"
+              fill="{{ slice.color }}"
+              class="pie-slice"
+              data-filter-status="{{ slice.status }}"
+              tabindex="0"
+              role="button"
+              aria-label="Filter to {{ slice.status|replace('_', ' ') }}, {{ slice.percentage }}%">
+          <title>{{ slice.status|replace('_', ' ')|title }}: {{ slice.count }} ({{ slice.percentage }}%)</title>
+        </path>
+        {% endfor %}
+      </svg>
+      <ul class="chart-legend">
+        {% for slice in summary.pie_chart_slices %}
+        <li data-filter-status="{{ slice.status }}" tabindex="0" role="button">
+          <span class="swatch" style="background: {{ slice.color }}"></span>
+          <span class="legend-label">{{ slice.status|replace('_', ' ')|title }}</span>
+          <span class="legend-count">{{ slice.count }} ({{ slice.percentage }}%)</span>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="chart-empty">No images to chart.</p>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<div id="filter-banner" style="display: none;" role="status" aria-live="polite">
+  <strong>Filter:</strong>
+  <span id="filter-tags"></span>
+  <button id="clear-filters" type="button">Clear all</button>
+</div>
+
+<section id="images">
+  <h2>Images ({{ images|length }})</h2>
+  <table id="images-table" class="display">
+    <thead>
+      <tr>
+        <th>Image name</th>
+        <th>Used by</th>
+        <th>Java</th>
+        <th>Node.js</th>
+        <th>.NET</th>
+        <th>Go</th>
+        <th>Deep scan</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for img in images %}
+      <tr data-image="{{ img.image_name }}">
+        <td>{{ img.image_name }}</td>
+        <td class="used-by-cell">
+          <span class="used-by-count">{{ img.used_by_count }}</span>
+          <script type="application/json" class="consumers-data">{{ img.consumers|tojson }}</script>
+        </td>
+        <td>{{ img.java.compatible }}{% if img.java.version and img.java.version != "None" %} ({{ img.java.version }}){% endif %}</td>
+        <td>{{ img.node.compatible }}{% if img.node.version and img.node.version != "None" %} ({{ img.node.version }}){% endif %}</td>
+        <td>{{ img.dotnet.compatible }}{% if img.dotnet.version and img.dotnet.version != "None" %} ({{ img.dotnet.version }}){% endif %}</td>
+        <td>{{ img.go.compatible }}{% if img.go.version and img.go.version != "None" %} ({{ img.go.version }}){% endif %}</td>
+        <td>
+          {% if img.deep_scan.match %}
+          {{ img.deep_scan.confidence }}{% if img.deep_scan.v2_aware %} (v2-aware){% else %} (v1-only){% endif %}
+          {% else %}
+          —
+          {% endif %}
+        </td>
+        <td class="status-{{ img.overall_status }}">{{ img.overall_status }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section id="errors">
+  <h2>Errors ({{ errors|length }})</h2>
+  {% if errors %}
+  <table id="errors-table" class="display">
+    <thead><tr><th>Image name</th><th>Error</th><th>Used by</th></tr></thead>
+    <tbody>
+      {% for err in errors %}
+      <tr>
+        <td>{{ err.image_name }}</td>
+        <td>{{ err.error }}</td>
+        <td>{{ err.consumers|length }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>No errors.</p>
+  {% endif %}
+</section>
+
+<script>
+{% include "assets/datatables.min.js" %}
+</script>
+<script>
+$(document).ready(function() {
+
+  // ============================================================
+  // Shared filter infrastructure — extended in prompt 08
+  // ============================================================
+
+  var STATUS_COL = 7;
+
+  var activeFilters = {};
+  var imagesTable = null;
+
+  function setFilter(name, label, columnIndex, regex) {
+    activeFilters[name] = { label: label, columnIndex: columnIndex, regex: regex };
+    imagesTable.column(columnIndex).search(regex, true, false).draw();
+    renderBanner();
+  }
+
+  function clearFilter(name) {
+    if (!activeFilters[name]) return;
+    var col = activeFilters[name].columnIndex;
+    delete activeFilters[name];
+    imagesTable.column(col).search('').draw();
+    renderBanner();
+  }
+
+  function clearAllFilters() {
+    Object.keys(activeFilters).forEach(function(n) {
+      imagesTable.column(activeFilters[n].columnIndex).search('');
+    });
+    activeFilters = {};
+    imagesTable.draw();
+    renderBanner();
+  }
+
+  function renderBanner() {
+    var names = Object.keys(activeFilters);
+    var banner = $('#filter-banner');
+    if (names.length === 0) {
+      banner.hide();
+      return;
+    }
+    var tagsHtml = names.map(function(n) {
+      var f = activeFilters[n];
+      return '<span class="tag" data-filter-name="' + n + '">' +
+        f.label +
+        ' <span class="remove" title="Remove this filter">\u00d7</span>' +
+        '</span>';
+    }).join(' ');
+    $('#filter-tags').html(tagsHtml);
+    banner.show();
+  }
+
+  window.reportFilters = {
+    set: setFilter,
+    clear: clearFilter,
+    clearAll: clearAllFilters,
+  };
+
+  // ============================================================
+  // Consumers child-row helper
+  // ============================================================
+  function formatConsumers(consumersJson) {
+    var consumers = JSON.parse(consumersJson);
+    if (!consumers.length) return '<em>No consumer details.</em>';
+    var html = '<table class="consumers-table"><thead><tr>' +
+      '<th>Source</th><th>Namespace</th><th>Object type</th><th>Object name</th>' +
+      '<th>Container</th><th>Registry org</th><th>Registry repo</th>' +
+      '</tr></thead><tbody>';
+    consumers.forEach(function(c) {
+      html += '<tr>' +
+        '<td>' + (c.source || '') + '</td>' +
+        '<td>' + (c.namespace || '') + '</td>' +
+        '<td>' + (c.object_type || '') + '</td>' +
+        '<td>' + (c.object_name || '') + '</td>' +
+        '<td>' + (c.container_name || '') + '</td>' +
+        '<td>' + (c.registry_org || '') + '</td>' +
+        '<td>' + (c.registry_repo || '') + '</td>' +
+        '</tr>';
+    });
+    html += '</tbody></table>';
+    return html;
+  }
+
+  // ============================================================
+  // DataTables init
+  // ============================================================
+  imagesTable = $('#images-table').DataTable({
+    pageLength: 25,
+    order: [[7, 'asc']]
+  });
+
+  $('#images-table tbody').on('click', 'td.used-by-cell', function() {
+    var tr = $(this).closest('tr');
+    var row = imagesTable.row(tr);
+    if (row.child.isShown()) {
+      row.child.hide();
+      tr.removeClass('shown');
+    } else {
+      var jsonText = $(this).find('.consumers-data').text();
+      row.child(formatConsumers(jsonText)).show();
+      tr.addClass('shown');
+    }
+  });
+
+  if ($('#errors-table').length) {
+    $('#errors-table').DataTable({ pageLength: 10 });
+  }
+
+  // ============================================================
+  // Status card clicks
+  // ============================================================
+  $('.card.status-card').on('click', function() {
+    if ($(this).hasClass('empty')) return;
+    var status = $(this).data('filter-status');
+    setFilter('status', 'Status: ' + status.replace(/_/g, ' '), STATUS_COL, '^' + status + '$');
+  });
+
+  $('.card.total-card').on('click', clearAllFilters);
+
+  // ============================================================
+  // Pie chart slice and legend clicks
+  // ============================================================
+  function handleStatusShortcut(e) {
+    var status = $(this).data('filter-status');
+    if (!status) return;
+    setFilter('status', 'Status: ' + status.replace(/_/g, ' '), STATUS_COL, '^' + status + '$');
+  }
+  $('.pie-slice').on('click', handleStatusShortcut);
+  $('.chart-legend li').on('click', handleStatusShortcut);
+
+  // ============================================================
+  // Banner interactions
+  // ============================================================
+  $('#clear-filters').on('click', clearAllFilters);
+  $('#filter-tags').on('click', '.tag .remove', function(e) {
+    e.stopPropagation();
+    var name = $(this).closest('.tag').data('filter-name');
+    clearFilter(name);
+  });
+
+  // ============================================================
+  // Runtime drill-down — clickable cells in "By runtime" table
+  // ============================================================
+  var RUNTIME_COLS = { java: 2, node: 3, dotnet: 4, go: 5 };
+  var RUNTIME_LABELS = { java: 'Java', node: 'Node.js', dotnet: '.NET', go: 'Go' };
+  var STATE_REGEX = {
+    yes: '^Yes',
+    no: '^No',
+    unknown: '^Unknown',
+    needs_review: '^Needs Review',
+    na: '^N/A',
+    none: '^None',
+  };
+  var STATE_LABELS = {
+    yes: 'Yes',
+    no: 'No',
+    unknown: 'Unknown',
+    needs_review: 'Needs review',
+    na: 'N/A',
+    none: 'None',
+  };
+
+  $('.compat-cell').on('click', function() {
+    if ($(this).hasClass('empty')) return;
+    var runtime = $(this).data('runtime');
+    var state = $(this).data('state');
+    var col = RUNTIME_COLS[runtime];
+    var regex = STATE_REGEX[state];
+    if (col === undefined || regex === undefined) return;
+    var label = RUNTIME_LABELS[runtime] + ': ' + STATE_LABELS[state];
+    window.reportFilters.set(runtime, label, col, regex);
+  });
+
+  // ============================================================
+  // Keyboard accessibility
+  // ============================================================
+  $('body').on('keydown', '[role="button"]', function(e) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      $(this).trigger('click');
+    }
+  });
+
+});
+</script>
+</body>
+</html>
