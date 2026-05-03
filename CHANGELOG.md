@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- `CLAUDE.md` at the repo root: orientation file for Claude Code with
+  dev environment, common commands, architecture overview, and
+  project-specific invariants.
+
 ### Fixed
 - CI `test` job now actually runs `pytest`. The job installed
   `pytest`/`pytest-cov` and uploaded `coverage.xml` but never invoked

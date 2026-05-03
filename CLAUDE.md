@@ -79,6 +79,7 @@ Aggregates the CSV by `image_name`, renders `report.html.j2` with all DataTables
 
 ## Project-specific invariants
 
+- **CHANGELOG must be updated for every user-visible change.** Add a concise entry under `## [Unreleased]` (Added / Changed / Fixed) in the same change that introduces the feature or fix — not in a follow-up. `[Unreleased]` accumulates until the next release tag, when it's renamed to the version. Keep entries terse — one or two short bullets, not paragraphs; the verbose explanation belongs in the PR/commit body.
 - **Version is single-sourced.** `src/__init__.py:__version__` and `pyproject.toml:version` must match. Convention: git tag `vX.Y` ↔ `"X.Y.0"`, hotfixes `vX.Y.Z` ↔ `"X.Y.Z"`. Bumping requires editing both files.
 - **Filesystem extraction is the source of truth.** OCI manifests, image labels, and `podman inspect` config are intentionally **not** used to gate or replace the rootfs scan — they're a known blind spot of this scanner (an image can claim to be Java 21 in metadata while shipping Java 8). When tempted to add a metadata-based shortcut, don't; extend the filesystem scan instead.
 - **`prompts/` is a gitignored maintainer workspace** (`prompts/ROADMAP.md` and siblings are local-only). Edits there should leave `git status` clean.
