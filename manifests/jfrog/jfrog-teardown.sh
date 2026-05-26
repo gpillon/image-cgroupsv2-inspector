@@ -1,28 +1,21 @@
 #!/bin/bash
 ###############################################################################
-# quay-teardown.sh — Remove all test resources created by quay-setup.sh.
+# jfrog-teardown.sh — Remove all test resources created by jfrog-setup.sh.
 #
-# Part of the image-cgroupsv2-inspector project (issue #28, epic #21).
-# Deletes Quay test repositories and cleans up local podman images.
-# The organization itself is never deleted.
+# Mirror of manifests/quay/quay-teardown.sh. Deletes the Docker image
+# folders (and all their tags) created under the JFrog repository, then
+# cleans up local podman images. The JFrog repository itself is never
+# deleted.
 #
 # Prerequisites:
-#   - curl   (for Quay API calls)
+#   - curl   (for JFrog Artifactory REST API calls)
 #   - podman (for local image cleanup)
 #
 # Usage:
-#   # Remove repos only (OAuth token)
-#   ./manifests/quay/quay-teardown.sh \
-#     --registry-url https://quay.lab.example.com \
-#     --token <your-oauth-token> \
-#     --tls-verify false
-#
-#   # Remove repos with robot account
-#   ./manifests/quay/quay-teardown.sh \
-#     --registry-url https://quay.lab.example.com \
-#     --username "myorg+robot" \
-#     --token <robot-token> \
-#     --tls-verify false
+#   ./manifests/jfrog/jfrog-teardown.sh \
+#     --registry-url https://acme.jfrog.io \
+#     --repo docker-local \
+#     --token <bearer-access-token>
 #
 ###############################################################################
 set -euo pipefail
@@ -48,7 +41,7 @@ error()   { echo -e "${RED}[ERROR]${NC} $*"; }
 # Defaults
 # ---------------------------------------------------------------------------
 REGISTRY_URL=""
-ORG="test-cgroupsv2"
+REPO="docker-local"
 USERNAME=""
 TOKEN=""
 TLS_VERIFY="true"
@@ -68,27 +61,30 @@ usage() {
     cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
 
-Remove all test resources created by quay-setup.sh.
+Remove all test resources created by jfrog-setup.sh.
 
 Required:
-  --registry-url URL   Quay instance URL (e.g. https://quay.example.com)
-  --token TOKEN        Quay OAuth or robot account token
+  --registry-url URL   JFrog Artifactory base URL (e.g. https://acme.jfrog.io)
+  --repo KEY           JFrog Docker repository key (e.g. docker-local)
+  --token TOKEN        JFrog Bearer access token
 
 Optional:
-  --org NAME           Quay organization (default: test-cgroupsv2)
-  --username USER      Registry login username (default: \$oauthtoken).
-                       Use org+robotname for robot accounts.
+  --username USER      Accepted for symmetry with jfrog-setup.sh (unused
+                       by teardown — REST DELETE uses Bearer token only).
   --tls-verify BOOL    Verify TLS certificates (default: true)
   --help               Show this help message
 
 Examples:
   $(basename "$0") \\
-    --registry-url https://quay.lab.example.com \\
-    --token my-token --tls-verify false
+    --registry-url https://acme.jfrog.io \\
+    --repo docker-local \\
+    --token my-bearer-token
 
   $(basename "$0") \\
-    --registry-url https://quay.lab.example.com \\
-    --username "myorg+robot" --token robot-token --tls-verify false
+    --registry-url https://artifactory.lab.example.com \\
+    --repo docker-local \\
+    --token my-bearer-token \\
+    --tls-verify false
 EOF
     exit 0
 }
@@ -99,7 +95,7 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --registry-url) REGISTRY_URL="$2"; shift 2 ;;
-        --org)          ORG="$2";          shift 2 ;;
+        --repo)         REPO="$2";         shift 2 ;;
         --username)     USERNAME="$2";     shift 2 ;;
         --token)        TOKEN="$2";        shift 2 ;;
         --tls-verify)   TLS_VERIFY="$2";   shift 2 ;;
@@ -133,6 +129,10 @@ validate_args() {
         error "--registry-url is required."
         usage
     fi
+    if [[ -z "$REPO" ]]; then
+        error "--repo is required."
+        usage
+    fi
     if [[ -z "$TOKEN" ]]; then
         error "--token is required."
         usage
@@ -147,50 +147,57 @@ registry_host() {
 }
 
 # ---------------------------------------------------------------------------
-# Delete a single repository via Quay API
+# Delete a single Docker image folder via JFrog Artifactory REST.
+#   DELETE /artifactory/{repo}/{image-name}
+# Removes all tags of the image in one call.
 # ---------------------------------------------------------------------------
 delete_repository() {
-    local repo="$1"
+    local image="$1"
 
     local curl_tls=()
     if [[ "$TLS_VERIFY" == "false" ]]; then
         curl_tls=(-k)
     fi
 
-    info "Deleting repository ${ORG}/${repo} ..."
+    info "Deleting ${REPO}/${image} ..."
 
     local http_code
     http_code=$(curl -s -o /dev/null -w "%{http_code}" \
         "${curl_tls[@]}" \
         -X DELETE \
         -H "Authorization: Bearer ${TOKEN}" \
-        "${REGISTRY_URL}/api/v1/repository/${ORG}/${repo}")
+        "${REGISTRY_URL}/artifactory/${REPO}/${image}")
 
     case "$http_code" in
         200|204)
-            success "  Deleted ${ORG}/${repo}."
+            success "  Deleted ${REPO}/${image}."
             DELETE_SUCCESS=$((DELETE_SUCCESS + 1))
             ;;
         404)
-            warn "  Repository ${ORG}/${repo} not found (HTTP 404). Skipping."
+            warn "  ${REPO}/${image} not found (HTTP 404). Skipping."
+            ;;
+        401|403)
+            error "  Authentication failed for ${REPO}/${image} (HTTP ${http_code}). Check your --token."
+            DELETE_FAIL=$((DELETE_FAIL + 1))
+            FAILED_REPOS+=("${image}")
             ;;
         *)
-            error "  Failed to delete ${ORG}/${repo} (HTTP ${http_code})."
+            error "  Failed to delete ${REPO}/${image} (HTTP ${http_code})."
             DELETE_FAIL=$((DELETE_FAIL + 1))
-            FAILED_REPOS+=("${repo}")
+            FAILED_REPOS+=("${image}")
             ;;
     esac
 }
 
 # ---------------------------------------------------------------------------
-# Delete all test repositories
+# Delete all test image folders
 # ---------------------------------------------------------------------------
 delete_all_repositories() {
-    info "Deleting test repositories from organization '${ORG}' ..."
+    info "Deleting test images from JFrog repository '${REPO}' ..."
     echo ""
 
-    for repo in "${TEST_REPOS[@]}"; do
-        delete_repository "$repo"
+    for image in "${TEST_REPOS[@]}"; do
+        delete_repository "$image"
     done
     echo ""
 }
@@ -202,12 +209,12 @@ cleanup_local_images() {
     local host
     host=$(registry_host)
 
-    info "Cleaning up local podman images for ${ORG}@${host} ..."
+    info "Cleaning up local podman images for ${REPO}@${host} ..."
 
-    for repo in "${TEST_REPOS[@]}"; do
+    for image in "${TEST_REPOS[@]}"; do
         local images
         images=$(podman images --format "{{.Repository}}:{{.Tag}}" \
-            | grep "^${host}/${ORG}/${repo}:" 2>/dev/null || true)
+            | grep "^${host}/${REPO}/${image}:" 2>/dev/null || true)
 
         if [[ -n "$images" ]]; then
             while IFS= read -r img; do
@@ -225,7 +232,6 @@ cleanup_local_images() {
         fi
     done
 
-    # Clean up locally built deep-scan images
     info "Cleaning up locally built deep-scan images ..."
     local deep_scan_local
     deep_scan_local=$(podman images --format "{{.Repository}}:{{.Tag}}" \
@@ -249,17 +255,17 @@ print_summary() {
     info "============================================"
     info "  Teardown complete"
     info "============================================"
-    success "Repositories deleted: ${DELETE_SUCCESS}"
+    success "Images deleted: ${DELETE_SUCCESS}"
     if [[ $DELETE_FAIL -gt 0 ]]; then
-        error "Repositories failed to delete: ${DELETE_FAIL}"
+        error "Images failed to delete: ${DELETE_FAIL}"
         for repo in "${FAILED_REPOS[@]}"; do
             error "  - ${repo}"
         done
     else
         success "No failures."
     fi
-    info "Organization: ${ORG}"
-    info "Registry:     $(registry_host)"
+    info "Repository: ${REPO}"
+    info "Registry:   $(registry_host)"
     echo ""
 }
 
@@ -269,7 +275,7 @@ print_summary() {
 main() {
     echo ""
     info "============================================"
-    info "  Quay test environment teardown"
+    info "  JFrog test environment teardown"
     info "============================================"
     echo ""
 

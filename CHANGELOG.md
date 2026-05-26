@@ -5,11 +5,46 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **JFrog Container Registry scan mode**: new `--jfrog-url`,
+  `--jfrog-token`, `--jfrog-repo`, `--jfrog-image`, `--jfrog-username`
+  CLI flags (with `JFROG_*` env-var fallbacks) activate scanning
+  against a JFrog Artifactory Docker repository. Authenticates via
+  Bearer access token; mutually exclusive with `--api-url` and
+  `--registry-url`. Emits `source=jfrog` in the unified CSV.
+- `src/jfrog_client.py` and `src/jfrog_collector.py`: speculate the
+  Quay equivalents but use the CE-friendly `/api/repositories?type=local`
+  + Docker Registry v2 catalog/tags endpoints, avoiding the Pro-gated
+  per-repo configuration endpoint.
+- `src/_registry_filters.py`: shared `filter_tags()` helper used by
+  both Quay and JFrog collectors (extracted from `RegistryCollector`).
+- `manifests/jfrog/jfrog-setup.sh` and `manifests/jfrog/jfrog-teardown.sh`:
+  publish and remove the test-image catalog on a JFrog Container
+  Registry instance using Bearer access-token authentication. Mirror
+  the existing Quay scripts and reuse the same Containerfile contexts
+  under `manifests/quay/deep-scan-images/`.
+- `manifests/test-images.sh` shared library: extracts the canonical
+  test-image catalog (`TEST_REPOS`, `UPSTREAM_TEST_IMAGES`,
+  `push_test_images`) so Quay and JFrog setup/teardown scripts no
+  longer duplicate the list.
+- CI: bash syntax-check (`bash -n`) for all `manifests/**/*.sh` and
+  `feature/jfrog-registry-scan` added to push/PR triggers.
 - `CLAUDE.md` at the repo root: orientation file for Claude Code with
   dev environment, common commands, architecture overview, and
   project-specific invariants.
 - `AGENTS.md` symlink to `CLAUDE.md` so vendor-neutral agents (Codex,
   Cursor, Aider, …) pick up the same orientation file.
+- `quay-vs-jfrog.md`: deep-dive comparison of the Quay REST API vs
+  the JFrog Artifactory + Docker Registry v2 API set as exercised by
+  this project's clients. Covers endpoint mapping, pagination, filter
+  semantics, cost/latency trade-offs, deletion asymmetries, and the
+  CE-vs-Pro endpoint split.
+
+### Changed
+- CSV `source` column: Quay registry scans now emit `quay` (was
+  `registry`); the new value `jfrog` is reserved for the upcoming
+  JFrog scan mode. HTML report `source_mode` follows the same vocabulary.
+  Breaking change for downstream consumers that filtered on
+  `source == "registry"`.
 
 ### Fixed
 - CI `test` job now actually runs `pytest`. The job installed
@@ -26,7 +61,7 @@ All notable changes to this project will be documented in this file.
   directly when its hostname matches `NO_PROXY` (exact or `.suffix`
   match) and via the proxy otherwise.
 
-## [2.5.0] — 2026-05-18
+## [2.5.0] — 2026-04-18
 
 ### Added
 - **HTML report** alongside the CSV output (#62): new `--html-report`

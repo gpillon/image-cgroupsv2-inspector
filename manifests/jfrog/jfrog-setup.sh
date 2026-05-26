@@ -1,42 +1,40 @@
 #!/bin/bash
 ###############################################################################
-# quay-setup.sh — Populate a Quay registry with test images for cgroups v2
-#                 compatibility testing.
+# jfrog-setup.sh — Populate a JFrog Container Registry with test images for
+#                  cgroups v2 compatibility testing.
 #
-# Part of the image-cgroupsv2-inspector project (issue #28, epic #21).
-# This is the Quay equivalent of the OpenShift manifests in manifests/cluster/.
+# Mirror of manifests/quay/quay-setup.sh for a JFrog Artifactory / JFrog
+# Container Registry instance. Containerfile sources are reused from
+# manifests/quay/deep-scan-images/ — only the destination differs.
 #
 # Prerequisites:
 #   - podman (for pulling, tagging, and pushing images)
-#   - curl   (for Quay API calls)
+#   - curl   (for JFrog Artifactory REST API calls)
 #
 # Usage:
-#   # Self-hosted Quay with self-signed cert (OAuth token)
-#   ./manifests/quay/quay-setup.sh \
-#     --registry-url https://quay.lab.example.com \
-#     --token <your-oauth-token> \
-#     --tls-verify false
+#   # JFrog Cloud (SaaS)
+#   ./manifests/jfrog/jfrog-setup.sh \
+#     --registry-url https://acme.jfrog.io \
+#     --repo docker-local \
+#     --username my.user@acme.com \
+#     --token <bearer-access-token>
 #
-#   # Self-hosted Quay with robot account
-#   ./manifests/quay/quay-setup.sh \
-#     --registry-url https://quay.lab.example.com \
-#     --org myorg \
-#     --username "myorg+robot" \
-#     --token <robot-token> \
+#   # Self-hosted JFrog with self-signed cert
+#   ./manifests/jfrog/jfrog-setup.sh \
+#     --registry-url https://artifactory.lab.example.com \
+#     --repo docker-local \
+#     --username admin \
+#     --token <bearer-access-token> \
 #     --tls-verify false
-#
-#   # quay.io
-#   ./manifests/quay/quay-setup.sh \
-#     --registry-url https://quay.io \
-#     --org my-test-org \
-#     --token <your-oauth-token>
 #
 ###############################################################################
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANIFESTS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-CONTAINERFILES_DIR="${SCRIPT_DIR}/deep-scan-images"
+
+# Containerfile contexts are shared with the Quay setup.
+CONTAINERFILES_DIR="${MANIFESTS_DIR}/quay/deep-scan-images"
 
 # ---------------------------------------------------------------------------
 # Color helpers
@@ -56,7 +54,7 @@ error()   { echo -e "${RED}[ERROR]${NC} $*"; }
 # Defaults
 # ---------------------------------------------------------------------------
 REGISTRY_URL=""
-ORG="test-cgroupsv2"
+REPO="docker-local"
 USERNAME=""
 TOKEN=""
 TLS_VERIFY="true"
@@ -75,32 +73,33 @@ usage() {
     cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
 
-Populate a Quay registry with test container images for cgroups v2
-compatibility testing.
+Populate a JFrog Container Registry with test container images for
+cgroups v2 compatibility testing.
 
 Required:
-  --registry-url URL   Quay instance URL (e.g. https://quay.example.com)
-  --token TOKEN        Quay OAuth or robot account token
+  --registry-url URL   JFrog Artifactory base URL (e.g. https://acme.jfrog.io)
+  --repo KEY           JFrog Docker repository key (e.g. docker-local)
+  --username USER      Username for podman login (typically the JFrog user
+                       associated with the access token)
+  --token TOKEN        JFrog Bearer access token
 
 Optional:
-  --org NAME           Quay organization (default: test-cgroupsv2)
-  --username USER      Registry login username (default: \$oauthtoken).
-                       Use org+robotname for robot accounts.
   --tls-verify BOOL    Verify TLS certificates (default: true)
   --help               Show this help message
 
 Examples:
   $(basename "$0") \\
-    --registry-url https://quay.lab.example.com \\
-    --token my-token --tls-verify false
+    --registry-url https://acme.jfrog.io \\
+    --repo docker-local \\
+    --username my.user@acme.com \\
+    --token my-bearer-token
 
   $(basename "$0") \\
-    --registry-url https://quay.lab.example.com \\
-    --username "myorg+robot" --token robot-token --tls-verify false
-
-  $(basename "$0") \\
-    --registry-url https://quay.io \\
-    --org my-test-org --token my-token
+    --registry-url https://artifactory.lab.example.com \\
+    --repo docker-local \\
+    --username admin \\
+    --token my-bearer-token \\
+    --tls-verify false
 EOF
     exit 0
 }
@@ -111,7 +110,7 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --registry-url) REGISTRY_URL="$2"; shift 2 ;;
-        --org)          ORG="$2";          shift 2 ;;
+        --repo)         REPO="$2";         shift 2 ;;
         --username)     USERNAME="$2";     shift 2 ;;
         --token)        TOKEN="$2";        shift 2 ;;
         --tls-verify)   TLS_VERIFY="$2";   shift 2 ;;
@@ -145,6 +144,14 @@ validate_args() {
         error "--registry-url is required."
         usage
     fi
+    if [[ -z "$REPO" ]]; then
+        error "--repo is required."
+        usage
+    fi
+    if [[ -z "$USERNAME" ]]; then
+        error "--username is required."
+        usage
+    fi
     if [[ -z "$TOKEN" ]]; then
         error "--token is required."
         usage
@@ -158,41 +165,49 @@ registry_host() {
     echo "$REGISTRY_URL" | sed -E 's|^https?://||' | sed 's|/.*||'
 }
 
-curl_opts() {
-    local opts=(-s -o /dev/null -w "%{http_code}")
-    if [[ "$TLS_VERIFY" == "false" ]]; then
-        opts+=(-k)
-    fi
-    echo "${opts[@]}"
-}
-
 # ---------------------------------------------------------------------------
-# Quay API: verify the organization exists
+# JFrog API: verify the repository exists and the token is valid.
+#   GET /artifactory/api/repositories?type=local
+# Lists local repositories and greps for the requested key. This endpoint
+# works on Artifactory Community Edition; the per-repo configuration
+# endpoint (/api/repositories/{repo}) is Pro-only and returns HTTP 400
+# on CE.
 # ---------------------------------------------------------------------------
-check_organization() {
-    info "Checking that Quay organization '${ORG}' exists ..."
+check_repository() {
+    info "Checking that JFrog repository '${REPO}' exists ..."
 
     local curl_tls=()
     if [[ "$TLS_VERIFY" == "false" ]]; then
         curl_tls=(-k)
     fi
 
-    local http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+    local response status body
+    response=$(curl -s -w $'\n%{http_code}' \
         "${curl_tls[@]}" \
         -H "Authorization: Bearer ${TOKEN}" \
-        "${REGISTRY_URL}/api/v1/organization/${ORG}")
+        "${REGISTRY_URL}/artifactory/api/repositories?type=local")
+    status="${response##*$'\n'}"
+    body="${response%$'\n'*}"
 
-    case "$http_code" in
+    case "$status" in
         200)
-            success "Organization '${ORG}' found."
+            if echo "$body" | grep -Eq "\"key\"[[:space:]]*:[[:space:]]*\"${REPO}\""; then
+                success "Repository '${REPO}' found."
+                return 0
+            fi
+            error "Repository '${REPO}' was not returned by /api/repositories?type=local."
+            error "Create it in JFrog Artifactory before running this script (kind: Local, package type: Docker)."
+            exit 1
             ;;
-        404)
-            error "Organization '${ORG}' does not exist. Please create it in Quay before running this script."
+        401|403)
+            error "Authentication failed (HTTP ${status}). Check your --token."
+            [[ -n "$body" ]] && error "  Server response: ${body}"
             exit 1
             ;;
         *)
-            error "Unable to verify organization '${ORG}' (HTTP ${http_code}). Check your --registry-url and --token."
+            error "Unable to list JFrog repositories (HTTP ${status})."
+            [[ -n "$body" ]] && error "  Server response: ${body}"
+            error "Check --registry-url and --token (and --tls-verify if using a self-signed cert)."
             exit 1
             ;;
     esac
@@ -205,12 +220,10 @@ podman_login() {
     local host
     host=$(registry_host)
     info "Logging in to ${host} with podman ..."
-
-    local login_user="${USERNAME:-\$oauthtoken}"
-    info "  username: ${login_user}"
+    info "  username: ${USERNAME}"
 
     if podman login "$host" \
-        --username="$login_user" \
+        --username="$USERNAME" \
         --password="$TOKEN" \
         --tls-verify="$TLS_VERIFY" 2>&1; then
         success "Podman login to ${host} succeeded."
@@ -230,11 +243,10 @@ pull_tag_push() {
 
     local host
     host=$(registry_host)
-    local target="${host}/${ORG}/${repo}:${tag}"
+    local target="${host}/${REPO}/${repo}:${tag}"
 
     info "Processing ${target}"
 
-    # Pull
     info "  Pulling ${upstream} ..."
     if ! podman pull "$upstream" --tls-verify="$TLS_VERIFY" 2>&1; then
         error "  Failed to pull ${upstream}"
@@ -243,7 +255,6 @@ pull_tag_push() {
         return 1
     fi
 
-    # Tag
     info "  Tagging as ${target} ..."
     if ! podman tag "$upstream" "$target" 2>&1; then
         error "  Failed to tag ${upstream} -> ${target}"
@@ -252,7 +263,6 @@ pull_tag_push() {
         return 1
     fi
 
-    # Push (with retry)
     local attempt
     for attempt in $(seq 1 "$MAX_RETRIES"); do
         info "  Pushing ${target} (attempt ${attempt}/${MAX_RETRIES}) ..."
@@ -274,7 +284,6 @@ pull_tag_push() {
 }
 
 # Push an additional tag for an image already pulled.
-# Reuses the local image from a previous pull_tag_push call.
 add_tag() {
     local source_repo="$1"
     local source_tag="$2"
@@ -282,8 +291,8 @@ add_tag() {
 
     local host
     host=$(registry_host)
-    local source="${host}/${ORG}/${source_repo}:${source_tag}"
-    local target="${host}/${ORG}/${source_repo}:${new_tag}"
+    local source="${host}/${REPO}/${source_repo}:${source_tag}"
+    local target="${host}/${REPO}/${source_repo}:${new_tag}"
 
     info "Adding extra tag ${target}"
 
@@ -326,11 +335,10 @@ build_and_push() {
     local host
     host=$(registry_host)
     local local_image="${repo}:${tag}"
-    local target="${host}/${ORG}/${repo}:${tag}"
+    local target="${host}/${REPO}/${repo}:${tag}"
 
     info "Processing ${target} (build from ${context_dir}/${containerfile_name})"
 
-    # Build
     info "  Building ${local_image} ..."
     if ! podman build \
         -t "$local_image" \
@@ -343,7 +351,6 @@ build_and_push() {
         return 1
     fi
 
-    # Tag
     info "  Tagging as ${target} ..."
     if ! podman tag "$local_image" "$target" 2>&1; then
         error "  Failed to tag ${local_image} -> ${target}"
@@ -352,7 +359,6 @@ build_and_push() {
         return 1
     fi
 
-    # Push (with retry)
     local attempt
     for attempt in $(seq 1 "$MAX_RETRIES"); do
         info "  Pushing ${target} (attempt ${attempt}/${MAX_RETRIES}) ..."
@@ -394,8 +400,8 @@ print_summary() {
     else
         success "No failures."
     fi
-    info "Organization: ${ORG}"
-    info "Registry:     $(registry_host)"
+    info "Repository: ${REPO}"
+    info "Registry:   $(registry_host)"
     echo ""
 }
 
@@ -405,13 +411,13 @@ print_summary() {
 main() {
     echo ""
     info "============================================"
-    info "  Quay test environment setup"
+    info "  JFrog test environment setup"
     info "============================================"
     echo ""
 
     validate_args
     check_prerequisites
-    check_organization
+    check_repository
     podman_login
     push_test_images
     print_summary
