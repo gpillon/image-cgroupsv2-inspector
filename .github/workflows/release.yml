@@ -47,11 +47,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: linux
             arch: amd64
             runner: ubuntu-latest
             artifact_name: image-cgroupsv2-inspector-linux-amd64
-          - os: ubuntu-latest
+          - os: linux
             arch: arm64
             runner: ubuntu-24.04-arm
             artifact_name: image-cgroupsv2-inspector-linux-arm64
@@ -59,10 +59,6 @@ jobs:
             arch: arm64
             runner: macos-latest
             artifact_name: image-cgroupsv2-inspector-darwin-arm64
-          - os: macos
-            arch: amd64
-            runner: macos-13
-            artifact_name: image-cgroupsv2-inspector-darwin-amd64
           - os: windows
             arch: amd64
             runner: windows-latest
@@ -107,17 +103,73 @@ jobs:
           path: dist/${{ matrix.artifact_name }}
 
   # ───────────────────────────────────────────────────────────────────
-  # Container image — multi-arch (amd64 + arm64) push to ghcr.io
+  # Container images — native build per arch, then manifest merge
+  # No QEMU emulation: each arch builds on its native runner
   # ───────────────────────────────────────────────────────────────────
-  container-release:
+  container-build:
     needs: test
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up QEMU (for arm64 emulation)
-        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Build and push single-arch image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true
+          cache-from: type=gha,scope=${{ matrix.suffix }}
+          cache-to: type=gha,scope=${{ matrix.suffix }},mode=max
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-digest-${{ matrix.suffix }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Merge per-arch digests into a single multi-arch manifest
+  container-manifest:
+    needs: container-build
+    runs-on: ubuntu-latest
+    steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -139,23 +191,25 @@ jobs:
             type=sha
             type=raw,value=latest
 
-      - name: Build and push multi-arch image
-        uses: docker/build-push-action@v6
+      - name: Download digests
+        uses: actions/download-artifact@v4
         with:
-          context: .
-          file: Containerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          pattern: container-digest-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: Create multi-arch manifest and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
 
   # ───────────────────────────────────────────────────────────────────
   # GitHub Release with all binaries attached
   # ───────────────────────────────────────────────────────────────────
   create-release:
-    needs: [build-binaries, container-release]
+    needs: [build-binaries, container-manifest]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -163,6 +217,7 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: image-cgroupsv2-inspector-*
           path: artifacts/
 
       - name: Create GitHub Release
