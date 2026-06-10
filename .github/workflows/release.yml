@@ -1,0 +1,202 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────
+  # Lint + Test gate (reusable workflow shared with CI)
+  # ───────────────────────────────────────────────────────────────────
+  lint-test:
+    uses: ./.github/workflows/lint-test.yml
+
+  # ───────────────────────────────────────────────────────────────────
+  # Binary builds — native runners for each arch (no emulation overhead)
+  #
+  # NOTE: ARM64 binaries and containers are provided for ARM-native hosts
+  # only. The tool does not support cross-architecture scanning: podman
+  # pull fetches the host's native arch, and runtime version detection
+  # (java -version, node -v, etc.) executes binaries inside the
+  # container, which fails across architectures. An ARM64 build scanning
+  # an amd64 cluster will pull wrong images or fail outright.
+  # ───────────────────────────────────────────────────────────────────
+  build-binaries:
+    needs: lint-test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+            artifact_name: image-cgroupsv2-inspector-linux-amd64
+          - os: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            artifact_name: image-cgroupsv2-inspector-linux-arm64
+          - os: macos
+            arch: arm64
+            runner: macos-latest
+            artifact_name: image-cgroupsv2-inspector-darwin-arm64
+
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build binary with PyInstaller
+        run: |
+          pyinstaller --onefile --name "${{ matrix.artifact_name }}" \
+            --add-data "src:src" \
+            --hidden-import=src \
+            image-cgroupsv2-inspector
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.artifact_name }}
+
+  # ───────────────────────────────────────────────────────────────────
+  # Container images — native build per arch, then manifest merge
+  # No QEMU emulation: each arch builds on its native runner
+  # See the ARM64 caveat in the binary-builds section above.
+  # ───────────────────────────────────────────────────────────────────
+  container-build:
+    needs: lint-test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Build and push single-arch image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true
+          cache-from: type=gha,scope=${{ matrix.suffix }}
+          cache-to: type=gha,scope=${{ matrix.suffix }},mode=max
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-digest-${{ matrix.suffix }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Merge per-arch digests into a single multi-arch manifest
+  container-manifest:
+    needs: container-build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+            type=raw,value=latest
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: container-digest-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: Create multi-arch manifest and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+
+  # ───────────────────────────────────────────────────────────────────
+  # GitHub Release with all binaries attached
+  # ───────────────────────────────────────────────────────────────────
+  create-release:
+    needs: [build-binaries, container-manifest]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: image-cgroupsv2-inspector-*
+          path: artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/**/*

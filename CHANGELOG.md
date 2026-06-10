@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- CI: release workflow (`release.yml`) builds standalone binaries for
+  Linux/macOS × amd64/arm64 using native runners (ARM runner for ARM
+  builds), and pushes multi-arch container image to `ghcr.io`. ARM64
+  builds are for ARM-native hosts only — the tool does not support
+  cross-architecture scanning.
+- CI: `binary-build-check` job in `ci.yml` verifies PyInstaller packaging
+  on every push/PR.
 - **JFrog Container Registry scan mode**: new `--jfrog-url`,
   `--jfrog-token`, `--jfrog-repo`, `--jfrog-image`, `--jfrog-username`
   CLI flags (with `JFROG_*` env-var fallbacks) activate scanning
