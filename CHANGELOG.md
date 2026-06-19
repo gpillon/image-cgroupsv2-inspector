@@ -4,7 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+- Containerfile now runs `dnf update` during build so base-image packages are
+  patched to the latest errata, clearing fixable OS-package CVEs.
+
+### Changed
+- Containerfile installs with `tsflags=nodocs` and clears the dnf cache in the
+  same layer to keep the image smaller.
+
 ### Added
+- README: document the prebuilt images published on Quay.io
+  (`quay.io/asalvati/image-cgroupsv2-inspector`) with a `podman pull` example.
 - CI: release workflow (`release.yml`) builds standalone binaries for
   Linux/macOS × amd64/arm64 using native runners (ARM runner for ARM
   builds), and pushes multi-arch container image to `ghcr.io`. ARM64
@@ -68,6 +78,12 @@ All notable changes to this project will be documented in this file.
   new `Run tests` step executes `pytest tests/ -v --cov=src
   --cov-report=xml --cov-report=term` and produces the coverage report
   referenced by the existing upload step.
+- OpenShift mode now configures bearer-token auth the way the Python
+  Kubernetes client expects, so valid `--token` values are no longer
+  dropped on protected API calls. `connect()` also performs an
+  authenticated OpenShift API check instead of treating the unauthenticated
+  `/version` probe as sufficient. The authenticated username is now
+  printed during connection for operator feedback.
 - Proxy env vars (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` and lowercase
   variants) are now honoured by the OpenShift API client (#67). The
   underlying `kubernetes` library uses `urllib3` directly and does not
