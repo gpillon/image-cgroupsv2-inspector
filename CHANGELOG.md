@@ -4,7 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- OpenShift mode: `--include-namespaces` flag retains only containers from
+  namespaces matching the given comma-separated glob patterns
+  (e.g. `--include-namespaces '*-dev,*-staging'`). Ignored when `--namespace`
+  is specified.
+- OpenShift mode: `--include-registries` flag filters collected images to only
+  those whose FQDN starts with one of the given comma-separated prefixes
+  (e.g. `--include-registries quay.io/myorg,registry.example.com`).
+- Quay mode: `--registry-user` flag (env: `QUAY_REGISTRY_USER`) enables HTTP
+  Basic auth for Quay installations where OAuth Application Tokens are not
+  available (e.g., robot accounts or docker-login credentials).
+
 ### Fixed
+- Quay/JFrog modes: `--registry-url` and `--jfrog-url` no longer crash when
+  the URL is passed without an `https://` scheme prefix; the scheme is now
+  prepended automatically.
 - OpenShift mode: relative `--pull-secret`, `--env-file`, and `--output-dir`
   paths are now resolved against the invocation directory before the CLI
   chdirs, so PyInstaller release binaries no longer overwrite a user-provided
